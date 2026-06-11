@@ -1,7 +1,8 @@
-import { useRef } from 'react'
-import { HiPaperClip, HiXMark } from 'react-icons/hi2'
+import { useRef, useState } from 'react'
+import { HiPaperClip, HiXMark, HiCamera, HiDocumentArrowUp } from 'react-icons/hi2'
 import { IoSend } from 'react-icons/io5'
 import type { Attachment } from './MessageBubble'
+import { stitchViewports } from '../utils/screenshot'
 
 interface FooterProps {
   inputText: string
@@ -14,6 +15,7 @@ interface FooterProps {
 export default function Footer({ inputText, attachedFiles, onInputChange, onFilesChange, onSend }: FooterProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [showMenu, setShowMenu] = useState(false)
   const canSend = inputText.trim().length > 0 || attachedFiles.length > 0
 
   const handleInput = () => {
@@ -32,9 +34,78 @@ export default function Footer({ inputText, attachedFiles, onInputChange, onFile
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).map(f => ({ name: f.name, size: f.size }))
-    onFilesChange([...attachedFiles, ...files])
+    const selectedFiles = Array.from(e.target.files || [])
+    
+    Promise.all(
+      selectedFiles.map(file => {
+        return new Promise<Attachment>((resolve) => {
+          const reader = new FileReader()
+          reader.onload = () => {
+            resolve({
+              name: file.name,
+              size: file.size,
+              dataUrl: reader.result as string
+            })
+          }
+          reader.onerror = () => {
+            resolve({
+              name: file.name,
+              size: file.size
+            })
+          }
+          reader.readAsDataURL(file)
+        })
+      })
+    ).then(newAttachments => {
+      onFilesChange([...attachedFiles, ...newAttachments])
+    })
+
     e.target.value = ''
+  }
+
+  const handleCaptureScreenshot = () => {
+    const chromeObj = (window as any).chrome
+    if (chromeObj && chromeObj.runtime && chromeObj.runtime.sendMessage) {
+      chromeObj.runtime.sendMessage({ action: 'capture_screenshot' }, async (resp: any) => {
+        if (resp?.error) {
+          console.error('Screenshot capture error:', resp.error)
+          return
+        }
+
+        try {
+          let finalDataUrl = ''
+          if (resp.viewports && resp.viewports.length > 0) {
+            finalDataUrl = await stitchViewports(
+              resp.viewports,
+              resp.scrollHeight,
+              resp.clientWidth,
+              resp.clientHeight
+            )
+          } else if (resp.dataUrl) {
+            finalDataUrl = resp.dataUrl
+          }
+
+          if (finalDataUrl) {
+            const title = resp.title || 'Active Tab'
+            const fileName = `${title}.png`
+            
+            // Avoid duplicates by name
+            if (!attachedFiles.some(f => f.name === fileName)) {
+              onFilesChange([
+                ...attachedFiles,
+                {
+                  name: fileName,
+                  dataUrl: finalDataUrl
+                }
+              ])
+            }
+          }
+        } catch (stitchErr) {
+          console.error('Stitching viewports failed:', stitchErr)
+        }
+      })
+    }
+    setShowMenu(false)
   }
 
   return (
@@ -77,16 +148,41 @@ export default function Footer({ inputText, attachedFiles, onInputChange, onFile
         {/* Action Row */}
         <div className="flex items-center justify-between px-3 pb-2.5 pt-1 border-t border-black/5 dark:border-white/5">
           {/* File input / attach button on the left */}
-          <div>
+          <div className="relative">
             <input ref={fileInputRef} type="file" multiple accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg" onChange={handleFileChange} className="hidden" />
             <button
               id="attach-btn"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setShowMenu(prev => !prev)}
               title="Attach file"
               className="w-8 h-8 rounded-full flex items-center justify-center text-gray-500 dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-white/10 hover:text-gray-800 dark:hover:text-gray-100 transition-all cursor-pointer"
             >
               <HiPaperClip className="w-5 h-5" />
             </button>
+
+            {showMenu && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setShowMenu(false)} />
+                <div className="absolute bottom-10 left-0 z-20 w-52 bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/15 rounded-xl shadow-xl py-1.5 focus:outline-none animate-in fade-in slide-in-from-bottom-2 duration-150">
+                  <button
+                    onClick={handleCaptureScreenshot}
+                    className="w-full px-4 py-2 text-left text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <HiCamera className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>Active Tab Screenshot</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowMenu(false)
+                      fileInputRef.current?.click()
+                    }}
+                    className="w-full px-4 py-2 text-left text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/5 flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <HiDocumentArrowUp className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>Upload Files</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Send button on the right */}
