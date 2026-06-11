@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { HiPaperClip } from 'react-icons/hi2'
 import { RiRobot2Line } from 'react-icons/ri'
 import ReactMarkdown from 'react-markdown'
@@ -16,6 +17,7 @@ interface Message {
   timestamp: Date
   tool_call_id?: string
   tool_calls?: any[]
+  annotations?: any[]
 }
 
 function fmt(bytes: number) {
@@ -28,6 +30,45 @@ export type { Message, Attachment }
 
 export default function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user'
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  // Pre-process citations/annotations in content to turn inline markers like 【5:4†source】 into clickable markdown links
+  let renderedContent = message.content || ''
+  const uniqueAnnotations: any[] = []
+
+  if (message.annotations && message.annotations.length > 0) {
+    // 1. Build a list of unique citations to assign stable indices (1, 2, 3...)
+    message.annotations.forEach((ann: any) => {
+      if (ann.url) {
+        const exists = uniqueAnnotations.some(u => 
+          (u.type === 'url_citation' && u.url === ann.url) ||
+          (u.type !== 'url_citation' && u.filename === ann.filename)
+        )
+        if (!exists) {
+          uniqueAnnotations.push(ann)
+        }
+      }
+    })
+    
+    // 2. Sequential regex replacement of markers like 【5:0†source】
+    // Match any pattern like 【digits:digits†source】 or 【digits†source】
+    const markerRegex = /【\d+(?::\d+)?†source】/g
+    let matchIndex = 0
+    
+    renderedContent = renderedContent.replace(markerRegex, () => {
+      const ann = message.annotations![matchIndex++]
+      if (!ann || !ann.url) return '' // Remove raw marker if no matching annotation is found
+      
+      const uniqueIdx = uniqueAnnotations.findIndex(u => 
+        (u.type === 'url_citation' && u.url === ann.url) ||
+        (u.type !== 'url_citation' && u.filename === ann.filename)
+      )
+      
+      const citeNum = uniqueIdx !== -1 ? uniqueIdx + 1 : matchIndex
+      // Return the markdown link styled as a nice numbered bracket [1], [2], etc.
+      return `[[${citeNum}]](${ann.url})`
+    })
+  }
 
   return (
     <div className="w-full py-4 border-b border-gray-100 dark:border-gray-900/50 last:border-0">
@@ -91,10 +132,11 @@ export default function MessageBubble({ message }: { message: Message }) {
                     h2: ({ node, ...props }) => <h2 className="text-sm font-bold mt-3.5 mb-1.5 text-gray-900 dark:text-white" {...props} />,
                     h3: ({ node, ...props }) => <h3 className="text-xs font-bold mt-3 mb-1 text-gray-900 dark:text-white" {...props} />,
                     strong: ({ node, ...props }) => <strong className="font-semibold text-gray-950 dark:text-white" {...props} />,
-                    code: ({ node, ...props }) => <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono text-xs text-rose-600 dark:text-rose-400 border border-black/5 dark:border-white/5" {...props} />
+                    code: ({ node, ...props }) => <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono text-xs text-rose-600 dark:text-rose-400 border border-black/5 dark:border-white/5" {...props} />,
+                    a: ({ node, ...props }) => <a className="text-emerald-600 dark:text-emerald-400 hover:underline font-semibold transition-colors" target="_blank" rel="noopener noreferrer" {...props} />
                   }}
                 >
-                  {message.content}
+                  {renderedContent}
                 </ReactMarkdown>
               ) : (
                 <div className="flex gap-1 items-center h-4 mt-2">
@@ -108,6 +150,83 @@ export default function MessageBubble({ message }: { message: Message }) {
                 </div>
               )}
             </div>
+
+            {/* Render Citations / Sources Used (Azure UI Style with Show More/Less) */}
+            {uniqueAnnotations.length > 0 && (
+              <div className="mt-4 pt-3 border-t border-gray-100 dark:border-gray-900/50">
+                <div className="text-[10px] font-bold text-gray-400 dark:text-gray-500 tracking-wider uppercase mb-2">
+                  Sources & Citations
+                </div>
+                <div className="space-y-1.5">
+                  {(isExpanded ? uniqueAnnotations : uniqueAnnotations.slice(0, 1)).map((ann: any, idx: number) => {
+                    const isUrl = ann.type === 'url_citation';
+                    let displayTitle = ann.title || ann.url;
+                    
+                    // Format nice title for URLs/files
+                    if (ann.url) {
+                      try {
+                        const urlObj = new URL(ann.url);
+                        if (urlObj.pathname.endsWith('.md')) {
+                          const parts = urlObj.pathname.split('/');
+                          displayTitle = parts[parts.length - 1]
+                            .replace('.md', '')
+                            .split('_')
+                            .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+                            .join(' ');
+                        } else {
+                          displayTitle = ann.title || urlObj.hostname.replace('www.', '');
+                        }
+                      } catch {
+                        displayTitle = ann.title || ann.url;
+                      }
+                    }
+                    
+                    return (
+                      <a
+                        key={idx}
+                        href={ann.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between p-2 rounded-lg bg-gray-50/50 dark:bg-gray-900/30 hover:bg-emerald-50/20 dark:hover:bg-emerald-950/10 border border-black/5 dark:border-white/5 transition-all text-xs group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {/* Number badge */}
+                          <span className="shrink-0 flex items-center justify-center w-5 h-5 rounded bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold font-mono text-[10px] group-hover:bg-emerald-100 group-hover:text-emerald-700 dark:group-hover:bg-emerald-950/50 dark:group-hover:text-emerald-400 transition-colors">
+                            {idx + 1}
+                          </span>
+                          {/* Icon & Title */}
+                          <span className="text-gray-400 dark:text-gray-500 group-hover:text-emerald-500 transition-colors shrink-0">
+                            {isUrl ? '🌐' : '📄'}
+                          </span>
+                          <span className="font-medium text-gray-700 dark:text-gray-300 truncate group-hover:text-emerald-900 dark:group-hover:text-emerald-300 transition-colors">
+                            {displayTitle}
+                          </span>
+                        </div>
+                        {/* URL snippet on the right */}
+                        {ann.url && (
+                          <span className="text-[10px] text-gray-400 dark:text-gray-500 truncate max-w-[200px] ml-4 font-mono font-light group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
+                            {ann.url}
+                          </span>
+                        )}
+                      </a>
+                    );
+                  })}
+                </div>
+                
+                {/* Show More / Show Less Button */}
+                {uniqueAnnotations.length > 1 && (
+                  <div className="flex justify-end mt-2">
+                    <button
+                      onClick={() => setIsExpanded(!isExpanded)}
+                      className="px-2.5 py-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 rounded-md transition-all cursor-pointer"
+                    >
+                      {isExpanded ? 'Show less' : `Show more (+${uniqueAnnotations.length - 1})`}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="text-[9px] text-gray-400 dark:text-gray-500 mt-2">
               {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </div>

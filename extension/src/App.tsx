@@ -177,6 +177,14 @@ export default function App() {
                     : msg
                 )
               )
+            } else if (data.type === 'annotation') {
+              setMessages(prev =>
+                prev.map(msg =>
+                  msg.id === tempMsgId
+                    ? { ...msg, annotations: [...(msg.annotations || []), data.annotation] }
+                    : msg
+                )
+              )
             } else if (data.type === 'error') {
               throw new Error(data.message)
             }
@@ -187,12 +195,13 @@ export default function App() {
       }
 
       // Finalize the history state post-stream
-      currentHistory = currentHistory.map(msg =>
-        msg.id === tempMsgId
-          ? { ...msg, content: assistantContent || null }
-          : msg
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === tempMsgId
+            ? { ...msg, content: assistantContent || null }
+            : msg
+        )
       )
-      setMessages(currentHistory)
 
     } catch (err) {
       console.error('API Error:', err)

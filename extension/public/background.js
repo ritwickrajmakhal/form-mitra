@@ -51,15 +51,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 2. Loop scrolling and capturing viewports
         const viewports = [];
         let currentScroll = 0;
+        let captureCount = 0;
+        const maxCaptures = 5; // Cap captures to avoid hitting rate limits or memory issues
 
         // Scroll to top first
         await chrome.scripting.executeScript({
           target: { tabId: activeTab.id },
           func: () => window.scrollTo(0, 0)
         });
-        await new Promise(r => setTimeout(r, 100)); // Brief delay for scroll rendering
+        await new Promise(r => setTimeout(r, 150)); // Brief delay for scroll rendering
 
-        while (currentScroll < scrollHeight) {
+        while (currentScroll < scrollHeight && captureCount < maxCaptures) {
           // Scroll to position
           await chrome.scripting.executeScript({
             target: { tabId: activeTab.id },
@@ -67,26 +69,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             args: [currentScroll]
           });
 
-          // Brief delay for page layout rendering/rendering updates
-          await new Promise(r => setTimeout(r, 150));
+          // Wait 300ms between scrolls to allow rendering and stay under Chrome's rate limit
+          await new Promise(r => setTimeout(r, 300));
 
-          // Capture visible area
-          const dataUrl = await new Promise((resolve) => {
-            chrome.tabs.captureVisibleTab(null, { format: 'png' }, (url) => {
-              if (chrome.runtime.lastError) {
-                console.error(chrome.runtime.lastError.message);
-                resolve(null);
-              } else {
-                resolve(url);
-              }
+          // Capture visible area with retry logic on rate limits
+          let dataUrl = null;
+          let retries = 3;
+          while (retries > 0) {
+            dataUrl = await new Promise((resolve) => {
+              chrome.tabs.captureVisibleTab(null, { format: 'png' }, (url) => {
+                if (chrome.runtime.lastError) {
+                  const errMsg = chrome.runtime.lastError.message;
+                  console.warn(`Capture attempt failed (retries remaining: ${retries - 1}): ${errMsg}`);
+                  resolve(null);
+                } else {
+                  resolve(url);
+                }
+              });
             });
-          });
+
+            if (dataUrl) {
+              break;
+            }
+
+            retries--;
+            if (retries > 0) {
+              // Wait 500ms to clear the rate limit window
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
 
           if (dataUrl) {
             viewports.push({
               y: currentScroll,
               dataUrl
             });
+            captureCount++;
           }
 
           if (currentScroll + clientHeight >= scrollHeight) {

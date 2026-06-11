@@ -77,12 +77,33 @@ def handle_chat(payload: ChatRequest):
                 )
                 
                 for chunk in response_stream:
+
                     # 1. Output text delta chunk
                     if chunk.type == "response.output_text.delta":
                         data = {"type": "text_delta", "text": chunk.delta}
                         yield f"data: {json.dumps(data)}\n\n"
                     
-                    # 2. Done event
+                    # 2. Annotation added event
+                    elif chunk.type == "response.output_text.annotation.added":
+                        ann = chunk.annotation
+                        annotation_dict = {}
+                        if hasattr(ann, "model_dump"):
+                            annotation_dict = ann.model_dump()
+                        elif hasattr(ann, "dict"):
+                            annotation_dict = ann.dict()
+                        elif hasattr(ann, "__dict__"):
+                            annotation_dict = {k: v for k, v in ann.__dict__.items() if not k.startswith('_')}
+                        else:
+                            annotation_dict = dict(ann)
+                            
+                        # Add chunk level properties for marker matching
+                        annotation_dict["output_index"] = getattr(chunk, "output_index", 0)
+                        annotation_dict["annotation_index"] = getattr(chunk, "annotation_index", 0)
+                        
+                        data = {"type": "annotation", "annotation": annotation_dict}
+                        yield f"data: {json.dumps(data)}\n\n"
+                    
+                    # 3. Done event
                     elif chunk.type == "response.done":
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         break
