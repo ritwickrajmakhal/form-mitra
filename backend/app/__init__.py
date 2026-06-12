@@ -19,6 +19,14 @@ async def lifespan(app: FastAPI):
         azure_client_manager.initialize()
     except Exception as e:
         logger.error(f"Could not initialize Azure AI Client on startup: {e}")
+        
+    try:
+        from app.services.local_model import local_model_service
+        logger.info("Initializing Local ONNX Model Service...")
+        local_model_service.initialize()
+    except Exception as e:
+        logger.error(f"Could not initialize local model on startup: {e}")
+        
     yield
     logger.info("Shutting down Form Mitra backend server...")
     azure_client_manager.close()

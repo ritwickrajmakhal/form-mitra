@@ -4,13 +4,14 @@ import logging
 import json
 from app.schemas import ChatRequest
 from app.client import azure_client_manager
+from app.services import intent_router, local_form_filler_agent
 
 logger = logging.getLogger("app.routes")
 
 router = APIRouter()
 
 @router.post("/chat")
-def handle_chat(payload: ChatRequest):
+async def handle_chat(payload: ChatRequest):
     # Ensure Azure client is initialized
     try:
         azure_client_manager.initialize()
@@ -65,10 +66,41 @@ def handle_chat(payload: ChatRequest):
                 "role": "user",
                 "content": content
             })
+
+        # Determine the last user query to route intent
+        last_user_message = ""
+        if payload.messages:
+            # Look for the last user message in history
+            for m in reversed(payload.messages):
+                if m.role == "user" and m.content:
+                    last_user_message = m.content
+                    break
+        if not last_user_message:
+            last_user_message = payload.message or ""
+
+        # Route the request
+        intent = intent_router.classify_intent(last_user_message)
+        logger.info(f"Routed request intent: '{intent}'")
+
+        if intent == "FILL":
+            logger.info("Routing request to local Phi-4 Agent via Agent Framework")
+            async def local_event_generator():
+                try:
+                    # Retrieve stream from local agent-framework agent
+                    async for update in local_form_filler_agent.run(last_user_message, stream=True):
+                        if update.text:
+                            data = {"type": "text_delta", "text": update.text}
+                            yield f"data: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                except Exception as stream_err:
+                    logger.error(f"Error in local event stream generation: {stream_err}")
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(stream_err)})}\n\n"
+
+            return StreamingResponse(local_event_generator(), media_type="text/event-stream")
             
-        logger.info(f"Streaming chat request to responses API with {len(input_messages)} messages")
+        logger.info(f"Streaming chat request to remote responses API with {len(input_messages)} messages")
         
-        def event_generator():
+        def remote_event_generator():
             try:
                 # Call responses API with stream=True
                 response_stream = openai_client.responses.create(
@@ -108,14 +140,15 @@ def handle_chat(payload: ChatRequest):
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         break
             except Exception as stream_err:
-                logger.error(f"Error in event stream generation: {stream_err}")
+                logger.error(f"Error in remote event stream generation: {stream_err}")
                 yield f"data: {json.dumps({'type': 'error', 'message': str(stream_err)})}\n\n"
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        return StreamingResponse(remote_event_generator(), media_type="text/event-stream")
         
     except Exception as e:
         logger.error(f"Error calling responses API stream: {e}")
         raise HTTPException(status_code=500, detail=f"Agent response stream error: {str(e)}")
+
 
 @router.delete("/session/{session_id}")
 def delete_session(session_id: str):
