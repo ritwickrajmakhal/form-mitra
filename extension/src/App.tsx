@@ -65,6 +65,8 @@ export default function App() {
           role: m.role,
           content: m.content,
           timestamp: new Date(m.timestamp),
+          progressEvents: m.progress_events ? JSON.parse(m.progress_events) : undefined,
+          citationMap: m.citation_map ? JSON.parse(m.citation_map) : undefined,
           attachments: m.attachments?.map((att: any) => ({
             name: att.name,
             size: att.size,
@@ -146,7 +148,7 @@ export default function App() {
           const userMsg: Message = {
             id: userMsgId,
             role: 'user',
-            content: 'Analyze the attached form screenshot. Detect all form fields. Identify any document uploads/attachments, and make sure to list the required documents along with their allowed formats and maximum file sizes if specified on the form or found in your knowledge base/search.',
+            content: 'Analyze the attached form screenshot. List all form fields and the required documents with their formats and size limits.',
             attachments: [
               {
                 name: `${resp.formRect ? 'Form' : 'Full Page'} Screenshot.png`,
@@ -281,6 +283,19 @@ export default function App() {
       formData.append('files', filesList[i])
     }
 
+    const tempMsgId = Date.now().toString()
+    const tempMsg: Message = {
+      id: tempMsgId,
+      role: 'assistant',
+      content: '',
+      isAgentProgress: true,
+      progressEvents: [],
+      timestamp: new Date()
+    }
+
+    // Instantly append progress tracker bubble to the conversation
+    setMessages(prev => [...prev, tempMsg])
+
     try {
       const response = await fetch(`${API_BASE_URL}/upload/${sessionId}`, {
         method: 'POST',
@@ -291,25 +306,76 @@ export default function App() {
         throw new Error(`Upload failed with status ${response.status}`)
       }
 
-      const result = await response.json()
-      
-      // Reload session to pull in DB changes (user upload messages & attachments references)
-      await handleLoadSession(sessionId)
-      
-      // Append an extra summary bubble from system showing where the temp file is saved
-      setMessages(prev => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: `### Document Text Extraction Summary\nSuccessfully uploaded and processed **${result.data.length}** document(s).\n\n**Extracted text stored in temp file:** \`${result.temp_file.replace(/\\/g, '/')}\`\n\n#### Files details:\n${result.data.map((f: any) => `- **${f.filename}** (${(f.filesize/1024).toFixed(1)} KB): *${f.extracted_text.slice(0, 80)}${f.extracted_text.length > 80 ? '...' : ''}*`).join('\n')}`,
-          timestamp: new Date()
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('Failed to create stream reader')
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith('data: ')) continue
+
+          try {
+            const dataStr = trimmed.slice(6)
+            const event = JSON.parse(dataStr)
+
+            if (event.type === 'done') {
+              // Store citation_map before reloading session, so we can inject it after load
+              const pendingCitationMap = event.citation_map || {}
+              // Reload session to pull in finalized message & attachments from backend DB
+              await handleLoadSession(sessionId)
+              // Patch the last assistant message with the citation map from the live event
+              // (session reload won't have it until DB persistence is added)
+              if (Object.keys(pendingCitationMap).length > 0) {
+                setMessages(prev => {
+                  const lastAssistantIdx = [...prev].reverse().findIndex(m => m.role === 'assistant' && m.content)
+                  if (lastAssistantIdx === -1) return prev
+                  const realIdx = prev.length - 1 - lastAssistantIdx
+                  return prev.map((m, i) => i === realIdx ? { ...m, citationMap: pendingCitationMap } : m)
+                })
+              }
+              return
+            } else if (event.type === 'error') {
+              throw new Error(event.message)
+            } else {
+              setMessages(prev =>
+                prev.map(msg =>
+                  msg.id === tempMsgId
+                    ? { ...msg, progressEvents: [...(msg.progressEvents || []), event] }
+                    : msg
+                )
+              )
+            }
+          } catch (err) {
+            console.error('Failed to parse upload SSE line:', line, err)
+          }
         }
-      ])
-      
+      }
+
     } catch (err) {
       console.error('Upload error:', err)
-      alert(`Upload failed: ${(err as Error).message}`)
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === tempMsgId
+            ? {
+                ...msg,
+                isAgentProgress: false,
+                content: `Upload failed: ${(err as Error).message}`
+              }
+            : msg
+        )
+      )
     } finally {
       setIsUploading(false)
       // reset file input
@@ -425,14 +491,9 @@ export default function App() {
               </div>
             )}
             
-            {isUploading && (
-              <div className="flex items-center gap-3 p-4 bg-emerald-500/10 dark:bg-emerald-400/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-800 dark:text-emerald-350 animate-pulse">
-                <span className="animate-spin rounded-full h-4.5 w-4.5 border-2 border-emerald-500 border-t-transparent" />
-                <span>Uploading and extracting document texts (OCR)...</span>
-              </div>
-            )}
             
-            {!isTyping && !isUploading && messages.length > 1 && messages[messages.length - 1].role === 'assistant' && (
+            
+            {!isTyping && !isUploading && messages.length > 1 && messages[messages.length - 1].role === 'assistant' && !messages.some(m => m.role === 'user' && m.content && (m.content.startsWith('Uploaded documents:') || m.content.startsWith('Uploaded attachments:'))) && (
               <div className="flex flex-col items-center justify-center p-5 border border-dashed border-emerald-500/30 bg-emerald-500/5 dark:bg-emerald-400/5 rounded-2xl space-y-2.5 animate-in fade-in duration-200">
                 <p className="text-xs text-gray-600 dark:text-zinc-400 font-medium text-center max-w-[280px]">
                   Remote agent response finished. Upload the required attachments/documents to extract text:

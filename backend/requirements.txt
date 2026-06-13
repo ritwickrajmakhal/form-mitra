@@ -8,3 +8,5 @@ python-dotenv>=1.0.1
 agent-framework>=1.0.0
 onnxruntime-genai-directml
 huggingface-hub
+pillow-heif
+python-docx

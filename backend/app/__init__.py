@@ -22,6 +22,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"Could not initialize SQLite database on startup: {e}")
 
     try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        logger.info("pillow-heif registered successfully for AVIF/HEIC image support.")
+    except Exception as e:
+        logger.error(f"Could not register pillow-heif opener: {e}")
+
+
+    try:
         azure_client_manager.initialize()
     except Exception as e:
         logger.error(f"Could not initialize Azure AI Client on startup: {e}")

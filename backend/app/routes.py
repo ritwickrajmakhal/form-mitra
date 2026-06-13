@@ -10,7 +10,7 @@ from typing import List
 from datetime import datetime
 from app.schemas import ChatRequest
 from app.client import azure_client_manager
-from app.services import intent_router, local_form_filler_agent
+from app.services import local_form_filler_agent
 from app.db import (
     create_session,
     save_message,
@@ -63,112 +63,243 @@ def get_easyocr_reader():
 
 @router.post("/upload/{session_id}")
 async def upload_documents(session_id: str, files: List[UploadFile] = File(...)):
-    try:
-        # Create directory at backend/uploads/session-id/
-        upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", session_id)
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        extracted_results = []
-        
-        for file in files:
-            if not file.filename:
-                continue
+    import asyncio
+    
+    async def upload_event_generator():
+        try:
+            # Create directory at backend/uploads/session-id/
+            upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", session_id)
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            extracted_results = []
+            all_progress_events = []
+            
+            for file in files:
+                if not file.filename:
+                    continue
+                    
+                file_path = os.path.join(upload_dir, file.filename)
                 
-            file_path = os.path.join(upload_dir, file.filename)
-            
-            # Read and save file content
-            content = await file.read()
-            with open(file_path, "wb") as f:
-                f.write(content)
+                # Emit OCR start event
+                ocr_start_ev = {'type': 'ocr_start', 'filename': file.filename}
+                all_progress_events.append(ocr_start_ev)
+                yield f"data: {json.dumps(ocr_start_ev)}\n\n"
                 
-            filesize = len(content)
-            # Infer file extension or content_type
-            filetype = file.content_type or file.filename.split(".")[-1]
-            
-            extracted_text = ""
-            
-            # Extract text based on file type
-            if file.filename.lower().endswith(".pdf"):
-                try:
-                    from pypdf import PdfReader
-                    reader = PdfReader(file_path)
-                    text_parts = []
-                    for page in reader.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    extracted_text = "\n".join(text_parts).strip()
-                except Exception as pdf_err:
-                    logger.error(f"Failed to extract text from PDF {file.filename}: {pdf_err}")
-                    extracted_text = ""
-            elif file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
-                try:
-                    reader = get_easyocr_reader()
-                    result = reader.readtext(file_path, detail=0)
-                    extracted_text = " ".join(result).strip()
-                except Exception as ocr_err:
-                    logger.error(f"Failed to OCR image {file.filename}: {ocr_err}")
-                    extracted_text = ""
-            else:
-                # Text files
-                try:
-                    extracted_text = content.decode("utf-8", errors="ignore").strip()
-                except Exception:
-                    extracted_text = ""
-            
-            # Handle empty/passport photo logic
-            is_image = file.filename.lower().endswith((".png", ".jpg", ".jpeg"))
-            if is_image and not extracted_text:
-                extracted_text = "Passport size photo"
-            elif not extracted_text:
-                extracted_text = "No text extracted"
+                # Read and save file content
+                content = await file.read()
+                with open(file_path, "wb") as f:
+                    f.write(content)
+                    
+                filesize = len(content)
+                filetype = file.content_type or file.filename.split(".")[-1]
                 
-            # Keep track of result
-            item = {
-                "filename": file.filename,
-                "filesize": filesize,
-                "extracted_text": extracted_text,
-                "filetype": filetype
-            }
-            extracted_results.append(item)
-            
-        # Create a user message in DB representing the upload
-        upload_msg_id = str(uuid.uuid4())
-        filenames_str = ", ".join([r["filename"] for r in extracted_results])
-        save_message(
-            upload_msg_id,
-            session_id,
-            "user",
-            f"Uploaded attachments: {filenames_str}",
-            datetime.utcnow().isoformat()
-        )
-        
-        # Save attachment references in DB
-        for r in extracted_results:
-            save_attachment(
+                extracted_text = ""
+                IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".heic", ".heif", ".avif")
+                is_image = file.filename.lower().endswith(IMAGE_EXTENSIONS)
+                
+                # Extract text based on file type
+                if file.filename.lower().endswith(".pdf"):
+                    try:
+                        import fitz  # PyMuPDF
+                        doc = fitz.open(file_path)
+                        text_parts = []
+                        for page_num in range(len(doc)):
+                            page = doc.load_page(page_num)
+                            page_text = page.get_text().strip()
+                            if len(page_text) > 15:
+                                text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                            else:
+                                # Scanned page OCR
+                                try:
+                                    pix = page.get_pixmap(dpi=150)
+                                    img_data = pix.tobytes("png")
+                                    from PIL import Image
+                                    import io
+                                    import numpy as np
+                                    img = Image.open(io.BytesIO(img_data))
+                                    if img.mode != 'RGB':
+                                        img = img.convert('RGB')
+                                    reader = get_easyocr_reader()
+                                    result = reader.readtext(np.array(img), detail=0)
+                                    ocr_text = " ".join(result).strip()
+                                    if ocr_text:
+                                        text_parts.append(f"--- Page {page_num + 1} (Scanned OCR) ---\n{ocr_text}")
+                                    else:
+                                        text_parts.append(f"--- Page {page_num + 1} (Scanned OCR - Empty) ---")
+                                except Exception as page_ocr_err:
+                                    logger.error(f"Failed to OCR scanned PDF page {page_num + 1}: {page_ocr_err}")
+                                    text_parts.append(f"--- Page {page_num + 1} (OCR Error) ---")
+                        extracted_text = "\n\n".join(text_parts).strip()
+                    except Exception as pdf_err:
+                        logger.error(f"Failed to extract text from PDF {file.filename}: {pdf_err}")
+                        extracted_text = ""
+                elif file.filename.lower().endswith(".docx"):
+                    try:
+                        import docx
+                        doc = docx.Document(file_path)
+                        text_parts = []
+                        for para in doc.paragraphs:
+                            if para.text.strip():
+                                text_parts.append(para.text)
+                        for table in doc.tables:
+                            for row in table.rows:
+                                row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                                if row_text:
+                                    text_parts.append(" | ".join(row_text))
+                        extracted_text = "\n".join(text_parts).strip()
+                    except Exception as docx_err:
+                        logger.error(f"Failed to extract text from DOCX {file.filename}: {docx_err}")
+                        extracted_text = ""
+                elif is_image:
+                    try:
+                        from PIL import Image
+                        import numpy as np
+                        img = Image.open(file_path)
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        reader = get_easyocr_reader()
+                        result = reader.readtext(np.array(img), detail=0)
+                        extracted_text = " ".join(result).strip()
+                    except Exception as ocr_err:
+                        logger.error(f"Failed to OCR image {file.filename}: {ocr_err}")
+                        extracted_text = ""
+                else:
+                    # Text files
+                    try:
+                        extracted_text = content.decode("utf-8", errors="ignore").strip()
+                    except Exception:
+                        extracted_text = ""
+                
+                # Handle empty/passport photo logic
+                if is_image and not extracted_text:
+                    extracted_text = "Passport size photo"
+                elif not extracted_text:
+                    extracted_text = "No text extracted"
+                    
+                # Keep track of result
+                item = {
+                    "filename": file.filename,
+                    "filesize": filesize,
+                    "extracted_text": extracted_text,
+                    "filetype": filetype
+                }
+                extracted_results.append(item)
+                
+                # Emit OCR end event
+                preview = extracted_text[:80] + "..." if len(extracted_text) > 80 else extracted_text
+                ocr_end_ev = {'type': 'ocr_end', 'filename': file.filename, 'text_preview': preview}
+                all_progress_events.append(ocr_end_ev)
+                yield f"data: {json.dumps(ocr_end_ev)}\n\n"
+                
+            # Create a user message in DB representing the upload
+            upload_msg_id = str(uuid.uuid4())
+            filenames_str = ", ".join([r["filename"] for r in extracted_results])
+            save_message(
                 upload_msg_id,
-                r["filename"],
-                r["filesize"],
-                f"/uploads/{session_id}/{r['filename']}"
+                session_id,
+                "user",
+                f"Uploaded attachments: {filenames_str}",
+                datetime.utcnow().isoformat()
             )
             
-        # Print data to a temp file
-        temp_fd, temp_file_path = tempfile.mkstemp(suffix=".json", prefix="ocr_extracted_")
-        with os.fdopen(temp_fd, 'w') as temp_file:
-            json.dump(extracted_results, temp_file, indent=2)
+            # Save raw attachment references in DB for user message
+            for r in extracted_results:
+                save_attachment(
+                    upload_msg_id,
+                    r["filename"],
+                    r["filesize"],
+                    f"/uploads/{session_id}/{r['filename']}"
+                )
+                
+            # 1. Fetch remote agent's response from SQLite DB history
+            db_messages = get_session_messages(session_id)
+            remote_response = ""
+            for msg in reversed(db_messages):
+                if msg["role"] == "assistant" and msg["content"] and "Hi, by looking" in msg["content"]:
+                    remote_response = msg["content"]
+                    break
+            if not remote_response:
+                for msg in reversed(db_messages):
+                    if msg["role"] == "assistant" and msg["content"] and msg["id"] != upload_msg_id:
+                        remote_response = msg["content"]
+                        break
+    
+            # 2. Setup progress queue and run local document processing workflow
+            queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
             
-        logger.info(f"Extracted data printed to temp file: {temp_file_path}")
-        print(f"Extracted data printed to temp file: {temp_file_path}")
-        
-        return {
-            "status": "success",
-            "temp_file": temp_file_path,
-            "data": extracted_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Error handling file upload: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            def on_progress(event_type: str, data: dict):
+                event = {"type": event_type, **data}
+                all_progress_events.append(event)
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+                
+            from app.services.agent_workflow import local_document_processing_workflow
+            
+            input_data = {
+                "remote_response": remote_response,
+                "files_list": extracted_results,
+                "session_id": session_id,
+                "on_progress": on_progress
+            }
+            
+            # Start workflow execution in background task
+            workflow_task = asyncio.create_task(local_document_processing_workflow.run(input_data))
+            
+            # Stream events as they are pushed to queue
+            while not workflow_task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+                    
+            # Await final result
+            run_result = await workflow_task
+            outputs = run_result.get_outputs()
+            result_dict = outputs[-1] if outputs else {}
+            
+            if isinstance(result_dict, dict):
+                final_text = result_dict.get("final_response", "Failed to process uploaded documents.")
+                processed_files = result_dict.get("processed_files", [])
+                citation_map = result_dict.get("citation_map", {})
+            else:
+                final_text = result_dict if isinstance(result_dict, str) else "Failed to process uploaded documents."
+                processed_files = []
+                citation_map = {}
+                
+            # 3. Save assistant response (local agent extraction) to DB
+            assistant_msg_id = str(uuid.uuid4())
+            save_message(
+                assistant_msg_id,
+                session_id,
+                "assistant",
+                final_text,
+                datetime.utcnow().isoformat(),
+                progress_events=json.dumps(all_progress_events)
+            )
+            
+            # 4. Save processed attachments in DB linked ONLY to assistant response
+            for pf in processed_files:
+                fname = pf.get("filename")
+                if not fname:
+                    continue
+                fpath = os.path.join(upload_dir, fname)
+                if os.path.exists(fpath) and os.path.isfile(fpath):
+                    save_attachment(
+                        assistant_msg_id,
+                        fname,
+                        os.path.getsize(fpath),
+                        f"/uploads/{session_id}/{fname}"
+                    )
+            
+            # Emit done event with payload
+            yield f"data: {json.dumps({'type': 'done', 'final_response': final_text, 'processed_files': processed_files, 'citation_map': citation_map})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Error handling file upload: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            
+    return StreamingResponse(upload_event_generator(), media_type="text/event-stream")
 
 @router.post("/chat")
 async def handle_chat(payload: ChatRequest):
@@ -265,40 +396,6 @@ async def handle_chat(payload: ChatRequest):
                     "content": content
                 })
 
-        # Route the request using the last user query
-        intent = intent_router.classify_intent(last_user_message)
-        logger.info(f"Routed request intent: '{intent}'")
-
-        if intent == "FILL":
-            logger.info("Routing request to local Phi-4 Agent via Agent Framework")
-            async def local_event_generator():
-                try:
-                    # Yield session_created event first
-                    yield f"data: {json.dumps({'type': 'session_created', 'session_id': session_id})}\n\n"
-                    
-                    assistant_text = ""
-                    # Retrieve stream from local agent-framework agent
-                    async for update in local_form_filler_agent.run(last_user_message, stream=True):
-                        if update.text:
-                            assistant_text += update.text
-                            data = {"type": "text_delta", "text": update.text}
-                            yield f"data: {json.dumps(data)}\n\n"
-                            
-                    # Save assistant message to SQLite
-                    save_message(
-                        str(uuid.uuid4()),
-                        session_id,
-                        "assistant",
-                        assistant_text,
-                        datetime.utcnow().isoformat()
-                    )
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                except Exception as stream_err:
-                    logger.error(f"Error in local event stream generation: {stream_err}")
-                    yield f"data: {json.dumps({'type': 'error', 'message': str(stream_err)})}\n\n"
-
-            return StreamingResponse(local_event_generator(), media_type="text/event-stream")
-            
         logger.info(f"Streaming chat request to remote responses API with {len(input_messages)} messages")
         
         def remote_event_generator():

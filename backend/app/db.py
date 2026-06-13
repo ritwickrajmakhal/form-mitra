@@ -34,6 +34,7 @@ def init_db():
             role TEXT NOT NULL,
             content TEXT,
             timestamp TEXT NOT NULL,
+            progress_events TEXT,
             FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE
         )
     """)
@@ -62,13 +63,13 @@ def create_session(session_id: str, title: str):
     finally:
         conn.close()
 
-def save_message(message_id: str, session_id: str, role: str, content: str | None, timestamp: str):
+def save_message(message_id: str, session_id: str, role: str, content: str | None, timestamp: str, progress_events: str | None = None):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (message_id, session_id, role, content, timestamp)
+            "INSERT INTO messages (id, session_id, role, content, timestamp, progress_events) VALUES (?, ?, ?, ?, ?, ?)",
+            (message_id, session_id, role, content, timestamp, progress_events)
         )
         conn.commit()
     finally:
@@ -100,7 +101,7 @@ def get_session_messages(session_id: str):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, role, content, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
+        cursor.execute("SELECT id, role, content, timestamp, progress_events FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
         messages = [dict(row) for row in cursor.fetchall()]
         
         for msg in messages:

@@ -201,7 +201,15 @@ class LocalModelService:
             self.initialize()
 
         # Format according to Phi-4 chat template
-        formatted_prompt = f"<|system|>\n{system_prompt}\n<|end|>\n<|user|>\n{prompt}\n<|end|>\n<|assistant|>\n"
+        if "<|user|>" in prompt or "<|system|>" in prompt:
+            formatted_prompt = ""
+            if "<|system|>" not in prompt and system_prompt:
+                formatted_prompt += f"<|system|>\n{system_prompt}\n<|end|>\n"
+            formatted_prompt += prompt
+            if not formatted_prompt.strip().endswith("<|assistant|>"):
+                formatted_prompt += "\n<|assistant|>\n"
+        else:
+            formatted_prompt = f"<|system|>\n{system_prompt}\n<|end|>\n<|user|>\n{prompt}\n<|end|>\n<|assistant|>\n"
         
         input_tokens = self.tokenizer.encode(formatted_prompt)
         params = og.GeneratorParams(self.model)
@@ -210,12 +218,41 @@ class LocalModelService:
         generator = og.Generator(self.model, params)
         generator.append_tokens(input_tokens)
         
+        tokenizer_stream = self.tokenizer.create_stream()
+
+        # Special tokens that must never appear in output.
+        # Phi models sometimes split these across multiple decode steps so we
+        # filter both per-token AND with a rolling buffer.
+        SPECIAL_TOKENS = ("<|end|>", "<|endoftext|>", "<|assistant|>", "<|user|>", "<|system|>")
+        # longest special token length — we hold back that many chars to check for splits
+        MAX_SPECIAL_LEN = max(len(t) for t in SPECIAL_TOKENS)
+
+        buffer = ""
         while not generator.is_done():
             generator.generate_next_token()
             new_tokens = generator.get_next_tokens()
             if new_tokens:
-                word = self.tokenizer.decode(new_tokens)
-                yield word
+                for token in new_tokens:
+                    word = tokenizer_stream.decode(token)
+                    if not word:
+                        continue
+                    # Fast single-token filter
+                    if word in SPECIAL_TOKENS or word == "\uFFFD":
+                        continue
+                    buffer += word
+                    # Flush safe prefix — keep MAX_SPECIAL_LEN chars in buffer
+                    # to catch special tokens that split across decode steps
+                    while len(buffer) > MAX_SPECIAL_LEN:
+                        # Remove any complete special token at start of buffer
+                        flush_char = buffer[0]
+                        buffer = buffer[1:]
+                        yield flush_char
+
+        # Flush remaining buffer, stripping any trailing special tokens
+        for st in SPECIAL_TOKENS:
+            buffer = buffer.replace(st, "")
+        if buffer:
+            yield buffer
 
 local_model_service = LocalModelService()
 
