@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     messages: list[MessageItem] | None = Field(None, description="The conversation history messages")
     message: str | None = Field(None, description="Legacy single message query")
     image: str | None = Field(None, description="Legacy single image attachment")
+    session_id: str | None = Field(None, description="The session ID for storing/retrieving chat history")
 
 class ChatResponse(BaseModel):
     response: str = Field(..., description="The response text from the agent")

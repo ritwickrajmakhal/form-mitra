@@ -17,6 +17,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const title = activeTab.title || 'Active Tab';
 
       try {
+        // 0. Detect if form exists and retrieve its rect
+        const formDetailsResults = await chrome.scripting.executeScript({
+          target: { tabId: activeTab.id },
+          func: () => {
+            const form = document.querySelector('form');
+            if (form) {
+              const rect = form.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                return {
+                  exists: true,
+                  left: rect.left + window.scrollX,
+                  top: rect.top + window.scrollY,
+                  width: rect.width,
+                  height: rect.height
+                };
+              }
+            }
+            return { exists: false };
+          }
+        });
+        const formRect = formDetailsResults[0]?.result || { exists: false };
+
         // 1. Retrieve page dimensions
         const dimensionsResults = await chrome.scripting.executeScript({
           target: { tabId: activeTab.id },
@@ -131,7 +153,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           scrollHeight,
           clientWidth,
           clientHeight,
-          devicePixelRatio
+          devicePixelRatio,
+          formRect: formRect && formRect.exists ? formRect : null
         });
 
       } catch (err) {

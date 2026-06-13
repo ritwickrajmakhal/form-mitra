@@ -16,6 +16,12 @@ logger = logging.getLogger("app")
 async def lifespan(app: FastAPI):
     logger.info("Starting up Form Mitra backend server...")
     try:
+        from app.db import init_db
+        init_db()
+    except Exception as e:
+        logger.error(f"Could not initialize SQLite database on startup: {e}")
+
+    try:
         azure_client_manager.initialize()
     except Exception as e:
         logger.error(f"Could not initialize Azure AI Client on startup: {e}")
