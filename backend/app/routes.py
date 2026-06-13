@@ -1,8 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 import logging
 import json
 import uuid
+import os
+import shutil
+import tempfile
+from typing import List
 from datetime import datetime
 from app.schemas import ChatRequest
 from app.client import azure_client_manager
@@ -45,6 +49,125 @@ def remove_session(session_id: str):
         return {"status": "success", "message": f"Session {session_id} deleted"}
     except Exception as e:
         logger.error(f"Error deleting session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+_easyocr_reader = None
+
+def get_easyocr_reader():
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        logger.info("Initializing EasyOCR Reader (CPU mode)...")
+        _easyocr_reader = easyocr.Reader(['en'], gpu=False)
+    return _easyocr_reader
+
+@router.post("/upload/{session_id}")
+async def upload_documents(session_id: str, files: List[UploadFile] = File(...)):
+    try:
+        # Create directory at backend/uploads/session-id/
+        upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", session_id)
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        extracted_results = []
+        
+        for file in files:
+            if not file.filename:
+                continue
+                
+            file_path = os.path.join(upload_dir, file.filename)
+            
+            # Read and save file content
+            content = await file.read()
+            with open(file_path, "wb") as f:
+                f.write(content)
+                
+            filesize = len(content)
+            # Infer file extension or content_type
+            filetype = file.content_type or file.filename.split(".")[-1]
+            
+            extracted_text = ""
+            
+            # Extract text based on file type
+            if file.filename.lower().endswith(".pdf"):
+                try:
+                    from pypdf import PdfReader
+                    reader = PdfReader(file_path)
+                    text_parts = []
+                    for page in reader.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text_parts.append(page_text)
+                    extracted_text = "\n".join(text_parts).strip()
+                except Exception as pdf_err:
+                    logger.error(f"Failed to extract text from PDF {file.filename}: {pdf_err}")
+                    extracted_text = ""
+            elif file.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                try:
+                    reader = get_easyocr_reader()
+                    result = reader.readtext(file_path, detail=0)
+                    extracted_text = " ".join(result).strip()
+                except Exception as ocr_err:
+                    logger.error(f"Failed to OCR image {file.filename}: {ocr_err}")
+                    extracted_text = ""
+            else:
+                # Text files
+                try:
+                    extracted_text = content.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    extracted_text = ""
+            
+            # Handle empty/passport photo logic
+            is_image = file.filename.lower().endswith((".png", ".jpg", ".jpeg"))
+            if is_image and not extracted_text:
+                extracted_text = "Passport size photo"
+            elif not extracted_text:
+                extracted_text = "No text extracted"
+                
+            # Keep track of result
+            item = {
+                "filename": file.filename,
+                "filesize": filesize,
+                "extracted_text": extracted_text,
+                "filetype": filetype
+            }
+            extracted_results.append(item)
+            
+        # Create a user message in DB representing the upload
+        upload_msg_id = str(uuid.uuid4())
+        filenames_str = ", ".join([r["filename"] for r in extracted_results])
+        save_message(
+            upload_msg_id,
+            session_id,
+            "user",
+            f"Uploaded attachments: {filenames_str}",
+            datetime.utcnow().isoformat()
+        )
+        
+        # Save attachment references in DB
+        for r in extracted_results:
+            save_attachment(
+                upload_msg_id,
+                r["filename"],
+                r["filesize"],
+                f"/uploads/{session_id}/{r['filename']}"
+            )
+            
+        # Print data to a temp file
+        temp_fd, temp_file_path = tempfile.mkstemp(suffix=".json", prefix="ocr_extracted_")
+        with os.fdopen(temp_fd, 'w') as temp_file:
+            json.dump(extracted_results, temp_file, indent=2)
+            
+        logger.info(f"Extracted data printed to temp file: {temp_file_path}")
+        print(f"Extracted data printed to temp file: {temp_file_path}")
+        
+        return {
+            "status": "success",
+            "temp_file": temp_file_path,
+            "data": extracted_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling file upload: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/chat")
