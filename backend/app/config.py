@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     azure_ai_agent_name: str = "form-mitra"
     azure_ai_agent_version: str = ""
     azure_ai_isolation_key: str = "my-isolation-key"
-    local_model_path: str = "models/Phi-4-mini-instruct-onnx"
+    local_model_path: str = "models/Phi-3-medium-128k-instruct-onnx-directml"
     download_local_model: bool = True
     local_model_gpu_device_id: int | None = None
     

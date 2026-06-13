@@ -106,17 +106,26 @@ class LocalModelService:
             settings.local_model_path
         )
         # Target specific GPU subfolder containing ONNX weights
-        self.gpu_model_path = os.path.join(self.model_dir, "gpu", "gpu-int4-rtn-block-32")
+        self.gpu_subfolder = (
+            "directml-int4-awq-block-128"
+            if "Phi-3-medium" in settings.local_model_path
+            else os.path.join("gpu", "gpu-int4-rtn-block-32")
+        )
+        self.gpu_model_path = os.path.join(self.model_dir, self.gpu_subfolder)
 
     def download_if_needed(self):
         # We check for the presence of the model directory and model weights file
         # The typical onnx model directory will contain model.onnx or multiple files.
         if not os.path.exists(self.gpu_model_path) or not os.listdir(self.gpu_model_path):
-            logger.info("Local model not found. Downloading Phi-4-mini-instruct-onnx from Hugging Face...")
+            repo_name = os.path.basename(settings.local_model_path)
+            repo_id = f"microsoft/{repo_name}"
+            allow_pattern = f"{self.gpu_subfolder.replace(os.sep, '/')}/*"
+            
+            logger.info(f"Local model not found. Downloading {repo_name} from Hugging Face...")
             os.makedirs(self.model_dir, exist_ok=True)
             snapshot_download(
-                repo_id="microsoft/Phi-4-mini-instruct-onnx",
-                allow_patterns=["gpu/gpu-int4-rtn-block-32/*"],
+                repo_id=repo_id,
+                allow_patterns=[allow_pattern],
                 local_dir=self.model_dir,
                 local_dir_use_symlinks=False
             )
