@@ -1,6 +1,9 @@
 import React, { useState } from 'react'
 import { 
-  HiPaperClip
+  HiPaperClip,
+  HiOutlineClipboard,
+  HiCheck,
+  HiOutlineInformationCircle
 } from 'react-icons/hi2'
 import { RiRobot2Line } from 'react-icons/ri'
 import ReactMarkdown from 'react-markdown'
@@ -79,6 +82,143 @@ function parseCitedContent(
     }
     return part
   })
+}
+
+interface ParsedField {
+  index: string
+  label: string
+  value: string
+  citationNum?: string
+  reasoning?: string
+}
+
+function parseFieldLine(line: string): ParsedField | null {
+  // Match lines like: "1. Field Name: Field Value [1]" or "5. Age: 24 [Calculated from DOB 01-01-2002 and today's date 14 June 2026]"
+  const match = line.match(/^\s*(\d+)\.\s*([^:]+):\s*(.*)$/)
+  if (!match) return null
+
+  const index = match[1]
+  const label = match[2].trim()
+  let rawValue = match[3].trim()
+
+  let citationNum: string | undefined
+  let reasoning: string | undefined
+
+  // 1. Extract citation marker at the end, e.g. "John Smith [1]" -> citationNum = "1"
+  const citationMatch = rawValue.match(/\s*\[(\d+)\]\s*$/)
+  if (citationMatch) {
+    citationNum = citationMatch[1]
+    rawValue = rawValue.slice(0, citationMatch.index).trim()
+  }
+
+  // 2. Extract calculation / reasoning in brackets if present, e.g. "[Calculated from DOB ...]"
+  const reasoningMatch = rawValue.match(/\[(Calculated[^[\]]*|calculated[^[\]]*|Reasoning[^[\]]*)\]/)
+  if (reasoningMatch) {
+    reasoning = reasoningMatch[1]
+    rawValue = (rawValue.substring(0, reasoningMatch.index!) + rawValue.substring(reasoningMatch.index! + reasoningMatch[0].length)).trim()
+  }
+  
+  // Double check if there is another citation that was before reasoning (e.g. Value [1] [Calculated ...])
+  if (!citationNum) {
+    const innerCitationMatch = rawValue.match(/\s*\[(\d+)\]\s*$/)
+    if (innerCitationMatch) {
+      citationNum = innerCitationMatch[1]
+      rawValue = rawValue.slice(0, innerCitationMatch.index).trim()
+    }
+  }
+
+  return {
+    index,
+    label,
+    value: rawValue,
+    citationNum,
+    reasoning
+  }
+}
+
+function InlineFieldRow({
+  field,
+  citationMap,
+  onCitationClick,
+  isHighlighted
+}: {
+  field: ParsedField
+  citationMap: Record<string, string>
+  onCitationClick: (num: string) => void
+  isHighlighted: boolean
+}) {
+  const [copied, setCopied] = useState(false)
+  const [showTooltip, setShowTooltip] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(field.value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      console.error('Failed to copy text:', err)
+    }
+  }
+
+  return (
+    <div
+      className={`py-0.5 flex items-baseline flex-wrap gap-x-1.5 transition-colors rounded ${
+        isHighlighted ? 'bg-emerald-500/10 px-1.5 -mx-1.5' : ''
+      }`}
+    >
+      <span className="font-semibold text-gray-800 dark:text-zinc-200">
+        {field.index}. {field.label}:
+      </span>
+
+      {field.reasoning && (
+        <span className="relative inline-flex items-center align-middle">
+          <button
+            onMouseEnter={() => setShowTooltip(true)}
+            onMouseLeave={() => setShowTooltip(false)}
+            onClick={() => setShowTooltip(prev => !prev)}
+            className="text-gray-400 dark:text-zinc-500 hover:text-emerald-600 dark:hover:text-emerald-400 cursor-help transition-colors flex items-center"
+            aria-label="Reasoning details"
+          >
+            <HiOutlineInformationCircle className="w-3.5 h-3.5" />
+          </button>
+          {showTooltip && (
+            <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 w-52 p-2 rounded bg-gray-900 dark:bg-zinc-800 text-white text-[10px] font-medium leading-normal shadow-lg border border-white/10 text-center">
+              {field.reasoning}
+              <span className="block w-2 h-2 bg-gray-900 dark:bg-zinc-800 rotate-45 mx-auto -mt-1 border-r border-b border-white/10 absolute top-full left-1/2 -translate-x-1/2" />
+            </span>
+          )}
+        </span>
+      )}
+
+      <span className="text-gray-900 dark:text-zinc-100 font-medium select-all">
+        {field.value}
+      </span>
+
+      {field.citationNum && citationMap[field.citationNum] && (
+        <CitationBadge
+          num={field.citationNum}
+          filename={citationMap[field.citationNum]}
+          onClick={onCitationClick}
+        />
+      )}
+
+      <button
+        onClick={handleCopy}
+        className={`inline-flex items-center justify-center p-0.5 rounded transition-all duration-150 cursor-pointer ${
+          copied
+            ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10'
+            : 'text-gray-400 dark:text-zinc-500 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-gray-150 dark:hover:bg-zinc-800'
+        }`}
+        title={copied ? "Copied!" : `Copy value: ${field.value}`}
+      >
+        {copied ? (
+          <HiCheck className="w-3 h-3" />
+        ) : (
+          <HiOutlineClipboard className="w-3.5 h-3.5" />
+        )}
+      </button>
+    </div>
+  )
 }
 
 export default function MessageBubble({ message }: { message: Message }) {
@@ -213,13 +353,28 @@ export default function MessageBubble({ message }: { message: Message }) {
             <div className="text-gray-800 dark:text-gray-200 text-sm leading-relaxed">
               {message.content ? (
                 message.citationMap && Object.keys(message.citationMap).length > 0 ? (
-                  // Render with inline citation badges when citationMap is available
-                  <div className="space-y-0.5">
-                    {message.content.split('\n').map((line, lineIdx) => (
-                      <div key={lineIdx} className="leading-relaxed">
-                        {parseCitedContent(line, message.citationMap!, handleCitationClick)}
-                      </div>
-                    ))}
+                  // Render with copyable fields when citationMap is available
+                  <div className="space-y-0.5 mt-1">
+                    {message.content.split('\n').map((line, lineIdx) => {
+                      const parsed = parseFieldLine(line)
+                      if (parsed) {
+                        return (
+                          <InlineFieldRow
+                            key={lineIdx}
+                            field={parsed}
+                            citationMap={message.citationMap!}
+                            onCitationClick={handleCitationClick}
+                            isHighlighted={highlightedCitation !== null && highlightedCitation === parsed.citationNum}
+                          />
+                        )
+                      }
+                      // Fallback for non-field lines
+                      return (
+                        <div key={lineIdx} className="leading-relaxed">
+                          {parseCitedContent(line, message.citationMap!, handleCitationClick)}
+                        </div>
+                      )
+                    })}
                   </div>
                 ) : (
                   <ReactMarkdown

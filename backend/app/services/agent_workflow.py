@@ -245,10 +245,21 @@ def compress_document_tool(file_path: str, session_id: str) -> str:
     elif ext.lower() == ".pdf":
         new_filename = f"{base_name}_compressed.pdf"
         dest_path = os.path.join(uploads_dir, new_filename)
-        # PDF compression using PyMuPDF
+        # Aggressively compress PDF by rendering pages at lower DPI and saving as optimized JPEG
         doc = fitz.open(file_path)
-        doc.save(dest_path, garbage=4, deflate=True)
-        logger.info(f"Compressed PDF saved to {dest_path}")
+        new_doc = fitz.open()
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            # 110 DPI is readable but very small (typically ~100KB per page)
+            pix = page.get_pixmap(dpi=110)
+            img_bytes = pix.tobytes("jpeg")
+            img_doc = fitz.open("pdf", img_bytes)
+            new_doc.insert_pdf(img_doc)
+            img_doc.close()
+        new_doc.save(dest_path, garbage=4, deflate=True)
+        new_doc.close()
+        doc.close()
+        logger.info(f"Aggressively compressed PDF saved to {dest_path}")
         return f"/uploads/{session_id}/{new_filename}"
     else:
         # Copy other files directly
@@ -263,7 +274,7 @@ def compress_document_tool(file_path: str, session_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 @step(name="plan_document_actions")
-async def plan_document_actions(remote_response: str, files_list: list, feedback: str = "") -> list:
+async def plan_document_actions(remote_response: str, files_list: list, feedback: str = "", user_feedback: str = "") -> list:
     """Analyzes requirements and files to produce a list of conversion/compression actions using the local model."""
     logger.info("Step 1: Planning document actions...")
     
@@ -279,6 +290,7 @@ Rules:
 3. Check if the uploaded file size exceeds the required maximum size (e.g., "1 MB" = 1,048,576 bytes). If yes, you MUST compress it (action: "compress").
 4. If the file already meets both format and size requirements, you MUST NOT convert or compress it (action: "none").
 5. Never output a "convert" action with "target_format": "none". Output "none" action instead.
+6. Always prioritize and execute actions requested in the ADDITIONAL USER INSTRUCTION / FEEDBACK. For example, if the user explicitly asks to compress a file (e.g. "compress the voter card under 200KB"), you MUST schedule a "compress" action for that file (action: "compress"), even if it already meets the default remote agent size constraints.
 
 Here is a planning walkthrough:
 - User uploads "aadhar_synthetic.avif" (15 KB, Image). Remote requires "Aadhar Card" as "PDF". Action: {"action": "convert", "filename": "aadhar_synthetic.avif", "target_format": "pdf"}
@@ -288,6 +300,8 @@ Here is a planning walkthrough:
 Do not output any other text or reasoning. Start directly with the JSON brackets []."""
 
     prompt = f"Remote Agent Response:\n{remote_response}\n\nUploaded Files:\n{json.dumps(files_list, indent=2)}"
+    if user_feedback:
+        prompt += f"\n\n--- ADDITIONAL USER INSTRUCTION / FEEDBACK: ---\n{user_feedback}"
     if feedback:
         prompt += f"\n\n--- FEEDBACK FROM PREVIOUS VERIFICATION ATTEMPT (Please correct planning/conversion issues): ---\n{feedback}"
         
@@ -430,7 +444,7 @@ async def get_current_datetime() -> str:
     return result
 
 @step(name="generate_extracted_response")
-async def generate_extracted_response(remote_response: str, processed_files: list, current_datetime: str = "", feedback: str = "") -> str:
+async def generate_extracted_response(remote_response: str, processed_files: list, current_datetime: str = "", feedback: str = "", user_feedback: str = "") -> str:
     """Generates the final formatted response utilizing OCR text mapped to form fields."""
     logger.info("Step 3: Formatting final response...")
 
@@ -484,6 +498,9 @@ Expected Output:
     prompt = f"Remote Agent Response (Required Fields & Uploads):\n{remote_response}\n\nOCR Texts (numbered for citations):\n" + "\n".join(ocr_descriptions)
     prompt += "\n\nCITATION INSTRUCTION: After each extracted value, append [N] where N is the Document number you found that value in (e.g. [1] for Document 1). If the value was calculated (like Age from DOB), do NOT add a citation. If 'Not found', no citation."
     
+    if user_feedback:
+        prompt += f"\n\n--- ADDITIONAL USER INSTRUCTION / CHAT FEEDBACK (Follow this formatting constraint or instruction): ---\n{user_feedback}\nIf it is just a greeting (e.g. 'hi' or 'hello'), reply naturally and briefly. Otherwise, follow the constraint on the output format."
+        
     if feedback:
         prompt += f"\n\n--- CRITICAL VERIFICATION FEEDBACK (You MUST correct this in your output): ---\n{feedback}"
 
@@ -603,6 +620,7 @@ async def local_document_processing_workflow(input_data: dict) -> dict:
     files_list = input_data.get("files_list", [])
     session_id = input_data.get("session_id", "")
     on_progress = input_data.get("on_progress")
+    user_feedback = input_data.get("user_feedback", "")
 
     def trigger_progress(event_type: str, event_data: dict):
         if on_progress:
@@ -624,7 +642,7 @@ async def local_document_processing_workflow(input_data: dict) -> dict:
         # Only pass feedback to planner if it directly relates to a file check failure (starts with 'File ')
         planner_feedback = feedback if feedback.strip().startswith("File ") else ""
         trigger_progress("planning_start", {"attempt": attempt + 1})
-        actions = await plan_document_actions(remote_response, files_list, planner_feedback)
+        actions = await plan_document_actions(remote_response, files_list, planner_feedback, user_feedback=user_feedback)
         trigger_progress("planning_end", {"attempt": attempt + 1, "actions": actions})
 
         # 2. Execute tools on files
@@ -644,7 +662,8 @@ async def local_document_processing_workflow(input_data: dict) -> dict:
             remote_response,
             processed_files,
             current_datetime=current_datetime,
-            feedback=feedback if not feedback.strip().startswith("File ") else ""
+            feedback=feedback if not feedback.strip().startswith("File ") else "",
+            user_feedback=user_feedback
         )
         # generate_extracted_response returns (text, citation_map)
         if isinstance(formatter_result, tuple):

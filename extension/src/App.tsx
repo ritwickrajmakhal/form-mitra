@@ -4,7 +4,7 @@ import MessageBubble from './components/MessageBubble'
 import Footer from './components/Footer'
 import type { Message } from './components/MessageBubble'
 import { stitchViewports } from './utils/screenshot'
-import { HiCamera, HiTrash, HiXMark, HiOutlineDocumentText, HiDocumentArrowUp } from 'react-icons/hi2'
+import { HiCamera, HiTrash, HiXMark, HiOutlineDocumentText, HiDocumentArrowUp, HiPaperAirplane } from 'react-icons/hi2'
 
 const WELCOME: Message = {
   id: '1',
@@ -22,6 +22,7 @@ export default function App() {
   const [sessions, setSessions] = useState<any[]>([])
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
+  const [localInput, setLocalInput] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const fetchSessions = useCallback(async () => {
@@ -67,6 +68,7 @@ export default function App() {
           timestamp: new Date(m.timestamp),
           progressEvents: m.progress_events ? JSON.parse(m.progress_events) : undefined,
           citationMap: m.citation_map ? JSON.parse(m.citation_map) : undefined,
+          annotations: m.annotations ? JSON.parse(m.annotations) : undefined,
           attachments: m.attachments?.map((att: any) => ({
             name: att.name,
             size: att.size,
@@ -383,8 +385,129 @@ export default function App() {
     }
   }
 
+  const handleSendLocalMessage = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = localInput.trim()
+    if (!trimmed || isTyping || !sessionId) return
+
+    setLocalInput('')
+    setIsTyping(true)
+
+    const userMsgId = Date.now().toString()
+    const userMsg: Message = {
+      id: userMsgId,
+      role: 'user',
+      content: trimmed,
+      timestamp: new Date(),
+    }
+
+    const tempMsgId = (Date.now() + 1).toString()
+    const tempMsg: Message = {
+      id: tempMsgId,
+      role: 'assistant',
+      content: '',
+      isAgentProgress: true,
+      progressEvents: [],
+      timestamp: new Date(),
+    }
+
+    setMessages(prev => [...prev, userMsg, tempMsg])
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/local_chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          message: trimmed,
+          messages: [
+            ...messages.filter(m => !m.isAgentProgress).map(m => ({
+              role: m.role,
+              content: m.content
+            })),
+            { role: 'user', content: trimmed }
+          ]
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Server responded with status ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('Failed to create stream reader')
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmedLine = line.trim()
+          if (!trimmedLine.startsWith('data: ')) continue
+
+          try {
+            const dataStr = trimmedLine.slice(6)
+            const event = JSON.parse(dataStr)
+
+            if (event.type === 'done') {
+              const pendingCitationMap = event.citation_map || {}
+              await handleLoadSession(sessionId)
+              if (Object.keys(pendingCitationMap).length > 0) {
+                setMessages(prev => {
+                  const lastAssistantIdx = [...prev].reverse().findIndex(m => m.role === 'assistant' && m.content)
+                  if (lastAssistantIdx === -1) return prev
+                  const realIdx = prev.length - 1 - lastAssistantIdx
+                  return prev.map((m, i) => i === realIdx ? { ...m, citationMap: pendingCitationMap } : m)
+                })
+              }
+              return
+            } else if (event.type === 'error') {
+              throw new Error(event.message)
+            } else {
+              setMessages(prev =>
+                prev.map(msg =>
+                  msg.id === tempMsgId
+                    ? { ...msg, progressEvents: [...(msg.progressEvents || []), event] }
+                    : msg
+                )
+              )
+            }
+          } catch (err) {
+            console.error('Failed to parse SSE line:', line, err)
+          }
+        }
+      }
+
+    } catch (err) {
+      console.error('Local chat error:', err)
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === tempMsgId
+            ? {
+                ...msg,
+                isAgentProgress: false,
+                content: `Error: ${(err as Error).message}`
+              }
+            : msg
+        )
+      )
+    } finally {
+      setIsTyping(false)
+    }
+  }
+
   // Check if we show the initial welcome middle CTA
   const showInitialCta = messages.filter(m => m.role === 'user').length === 0
+  const hasCompletedExtraction = messages.some(m => m.role === 'assistant' && m.citationMap && Object.keys(m.citationMap).length > 0)
 
   return (
     <div className="flex h-screen w-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans relative overflow-hidden">
@@ -517,6 +640,29 @@ export default function App() {
             )}
             <div ref={bottomRef} />
           </main>
+        )}
+
+        {hasCompletedExtraction && (
+          <form 
+            onSubmit={handleSendLocalMessage}
+            className="p-3 bg-white dark:bg-gray-900 border-t border-black/8 dark:border-white/10 flex items-center gap-2 animate-in slide-in-from-bottom-2 duration-200"
+          >
+            <input
+              type="text"
+              value={localInput}
+              onChange={(e) => setLocalInput(e.target.value)}
+              disabled={isTyping || isUploading}
+              placeholder="Ask the local agent (e.g., make all values capital)..."
+              className="flex-1 px-3.5 py-2 rounded-full border border-black/10 dark:border-white/15 bg-gray-50 dark:bg-gray-950 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500/50 dark:focus:ring-emerald-400/50 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-zinc-500"
+            />
+            <button
+              type="submit"
+              disabled={isTyping || isUploading || !localInput.trim()}
+              className="p-2 bg-emerald-600 dark:bg-emerald-500 hover:bg-emerald-700 dark:hover:bg-emerald-450 rounded-full text-white hover:scale-105 active:scale-95 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:scale-100 disabled:cursor-not-allowed flex items-center justify-center shrink-0"
+            >
+              <HiPaperAirplane className="w-4 h-4" />
+            </button>
+          </form>
         )}
 
         <Footer />

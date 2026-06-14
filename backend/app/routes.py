@@ -208,7 +208,8 @@ async def upload_documents(session_id: str, files: List[UploadFile] = File(...))
                     upload_msg_id,
                     r["filename"],
                     r["filesize"],
-                    f"/uploads/{session_id}/{r['filename']}"
+                    f"/uploads/{session_id}/{r['filename']}",
+                    extracted_text=r.get("extracted_text", "")
                 )
                 
             # 1. Fetch remote agent's response from SQLite DB history
@@ -275,7 +276,8 @@ async def upload_documents(session_id: str, files: List[UploadFile] = File(...))
                 "assistant",
                 final_text,
                 datetime.utcnow().isoformat(),
-                progress_events=json.dumps(all_progress_events)
+                progress_events=json.dumps(all_progress_events),
+                citation_map=json.dumps(citation_map) if citation_map else None
             )
             
             # 4. Save processed attachments in DB linked ONLY to assistant response
@@ -289,7 +291,8 @@ async def upload_documents(session_id: str, files: List[UploadFile] = File(...))
                         assistant_msg_id,
                         fname,
                         os.path.getsize(fpath),
-                        f"/uploads/{session_id}/{fname}"
+                        f"/uploads/{session_id}/{fname}",
+                        extracted_text=pf.get("extracted_text", "")
                     )
             
             # Emit done event with payload
@@ -300,6 +303,165 @@ async def upload_documents(session_id: str, files: List[UploadFile] = File(...))
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             
     return StreamingResponse(upload_event_generator(), media_type="text/event-stream")
+
+@router.post("/local_chat")
+async def handle_local_chat(payload: ChatRequest):
+    import asyncio
+    
+    session_id = payload.session_id
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    last_user_message = ""
+    if payload.messages:
+        for m in reversed(payload.messages):
+            if m.role == "user" and m.content:
+                last_user_message = m.content
+                break
+    if not last_user_message:
+        last_user_message = payload.message or ""
+
+    # Save user message to database
+    user_msg_id = str(uuid.uuid4())
+    save_message(
+        user_msg_id,
+        session_id,
+        "user",
+        last_user_message,
+        datetime.utcnow().isoformat()
+    )
+
+    # 1. Fetch remote agent's response and files list from DB history
+    db_messages = get_session_messages(session_id)
+    
+    # Rebuild files list from the most recent assistant message's attachments
+    files_list = []
+    last_assistant_msg = None
+    for msg in reversed(db_messages):
+        # Skip user message we just saved and find the last assistant message
+        if msg["role"] == "assistant" and msg.get("attachments"):
+            last_assistant_msg = msg
+            break
+
+    if last_assistant_msg:
+        for att in last_assistant_msg["attachments"]:
+            files_list.append({
+                "filename": att["name"],
+                "filesize": att["size"] or 0,
+                "filetype": att["name"].split(".")[-1],
+                "extracted_text": att.get("extracted_text") or ""
+            })
+    else:
+        # Fallback to user uploaded raw attachments if no assistant response has attachments yet
+        for msg in db_messages:
+            if msg["role"] == "user" and msg.get("attachments") and msg["id"] != user_msg_id:
+                for att in msg["attachments"]:
+                    files_list.append({
+                        "filename": att["name"],
+                        "filesize": att["size"] or 0,
+                        "filetype": att["name"].split(".")[-1],
+                        "extracted_text": att.get("extracted_text") or ""
+                    })
+                break
+
+    remote_response = ""
+    for msg in reversed(db_messages):
+        if msg["role"] == "assistant" and msg["content"] and "Hi, by looking" in msg["content"]:
+            remote_response = msg["content"]
+            break
+    if not remote_response:
+        for msg in reversed(db_messages):
+            if msg["role"] == "assistant" and msg["content"] and msg["id"] != user_msg_id:
+                remote_response = msg["content"]
+                break
+
+    # 2. Setup progress queue and run local document processing workflow
+    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    all_progress_events = []
+    
+    def on_progress(event_type: str, data: dict):
+        event = {"type": event_type, **data}
+        all_progress_events.append(event)
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    from app.services.agent_workflow import local_document_processing_workflow
+    
+    input_data = {
+        "remote_response": remote_response,
+        "files_list": files_list,
+        "session_id": session_id,
+        "on_progress": on_progress,
+        "user_feedback": last_user_message
+    }
+
+    async def local_chat_generator():
+        try:
+            # Yield session_created event
+            yield f"data: {json.dumps({'type': 'session_created', 'session_id': session_id})}\n\n"
+
+            # Start workflow task
+            workflow_task = asyncio.create_task(local_document_processing_workflow.run(input_data))
+
+            # Stream progress events
+            while not workflow_task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+
+            # Await final result
+            run_result = await workflow_task
+            outputs = run_result.get_outputs()
+            result_dict = outputs[-1] if outputs else {}
+
+            if isinstance(result_dict, dict):
+                final_text = result_dict.get("final_response", "Failed to process.")
+                processed_files = result_dict.get("processed_files", [])
+                citation_map = result_dict.get("citation_map", {})
+            else:
+                final_text = result_dict if isinstance(result_dict, str) else "Failed to process."
+                processed_files = []
+                citation_map = {}
+
+            # 3. Save assistant response to DB
+            assistant_msg_id = str(uuid.uuid4())
+            save_message(
+                assistant_msg_id,
+                session_id,
+                "assistant",
+                final_text,
+                datetime.utcnow().isoformat(),
+                progress_events=json.dumps(all_progress_events),
+                citation_map=json.dumps(citation_map) if citation_map else None
+            )
+
+            # 4. Save processed attachments in DB linked to assistant response
+            upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", session_id)
+            for pf in processed_files:
+                fname = pf.get("filename")
+                if not fname:
+                    continue
+                fpath = os.path.join(upload_dir, fname)
+                if os.path.exists(fpath) and os.path.isfile(fpath):
+                    save_attachment(
+                        assistant_msg_id,
+                        fname,
+                        os.path.getsize(fpath),
+                        f"/uploads/{session_id}/{fname}",
+                        extracted_text=pf.get("extracted_text", "")
+                    )
+
+            # Emit done event with payload
+            yield f"data: {json.dumps({'type': 'done', 'final_response': final_text, 'processed_files': processed_files, 'citation_map': citation_map})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Error handling local follow-up chat workflow: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(local_chat_generator(), media_type="text/event-stream")
+
 
 @router.post("/chat")
 async def handle_chat(payload: ChatRequest):
@@ -410,6 +572,7 @@ async def handle_chat(payload: ChatRequest):
                 )
                 
                 assistant_text = ""
+                all_annotations = []
                 for chunk in response_stream:
                     # 1. Output text delta chunk
                     if chunk.type == "response.output_text.delta":
@@ -434,20 +597,22 @@ async def handle_chat(payload: ChatRequest):
                         annotation_dict["output_index"] = getattr(chunk, "output_index", 0)
                         annotation_dict["annotation_index"] = getattr(chunk, "annotation_index", 0)
                         
+                        all_annotations.append(annotation_dict)
                         data = {"type": "annotation", "annotation": annotation_dict}
                         yield f"data: {json.dumps(data)}\n\n"
                     
                     # 3. Done event
                     elif chunk.type == "response.done":
                         break
-
+ 
                 # Save assistant message to SQLite
                 save_message(
                     str(uuid.uuid4()),
                     session_id,
                     "assistant",
                     assistant_text,
-                    datetime.utcnow().isoformat()
+                    datetime.utcnow().isoformat(),
+                    annotations=json.dumps(all_annotations) if all_annotations else None
                 )
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
             except Exception as stream_err:
