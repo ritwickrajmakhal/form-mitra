@@ -42,21 +42,17 @@ The local agent runs completely on the user's machine via an orchestrator (`agen
 ## 📺 Demo Video & Screenshots
 
 ### 🎥 Demo Video
-> [!TIP]
-> You can record a short demo video showing the extension scanning a form, requesting documents, and the local agent extracting values. Add your video link below:
 
-[![Form Mitra Demo](https://img.youtube.com/vi/YOUR_VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID "Form Mitra Demo - MS AISF 2026")
+https://github.com/user-attachments/assets/48d94a3a-092f-4d1f-a108-ea937dcdb3d6
 
 ### 📸 Extension Screenshots
-> [!NOTE]
-> Create an `assets/` folder at the root of your project and place your screenshot files (`extension_ui.png` and `processing_workflow.png`) there.
 
 <p align="center">
-   <img src="assets/remote_agent.png" alt="Remote Agent's workflow" style="max-width:48%;height:auto;margin:0 1%;" />
-   <img src="assets/local_agent.png" alt="Local Agent's workflow" style="max-width:48%;height:auto;margin:0 1%;" />
+   <img width="2554" height="1432" alt="Screenshot 2026-06-14 110100" src="https://github.com/user-attachments/assets/03d6eec6-33d9-41c6-8349-17e89a3966d1" style="max-width:48%;height:auto;margin:0 1%;" />
+    <img width="2559" height="1436" alt="Screenshot 2026-06-14 110117" src="https://github.com/user-attachments/assets/88753f65-eecf-4ae0-9803-45eb41125df3" style="max-width:48%;height:auto;margin:0 1%;" />
 </p>
 <p align="center">
-   <img src="assets/processing_workflow.png" alt="Processing Workflow" style="max-width:100%;height:auto;" />
+    <img width="1141" height="708" alt="Screenshot 2026-06-14 110207" src="https://github.com/user-attachments/assets/7e742335-c0e8-44a7-87de-50e08ad7fff0" style="max-width:100%;height:auto;" />
 </p>
 
 ---
