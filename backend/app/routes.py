@@ -46,6 +46,15 @@ def read_session_messages(session_id: str):
 def remove_session(session_id: str):
     try:
         delete_session(session_id)
+        
+        # Delete session folder from uploads directory if it exists
+        upload_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", session_id))
+        uploads_parent = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads"))
+        if os.path.commonpath([uploads_parent, upload_dir]) == uploads_parent and upload_dir != uploads_parent:
+            if os.path.exists(upload_dir):
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                logger.info(f"Deleted uploads folder for session {session_id}")
+                
         return {"status": "success", "message": f"Session {session_id} deleted"}
     except Exception as e:
         logger.error(f"Error deleting session: {e}")
